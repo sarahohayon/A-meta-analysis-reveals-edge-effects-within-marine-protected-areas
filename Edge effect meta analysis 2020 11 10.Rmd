@@ -1,0 +1,1604 @@
+---
+title: "Edge effect in no-take MPAs - a meta-analysis"
+author: "Sarah Ohayon"
+date: "10/11/2020"
+output: html_document
+
+---
+## This R code is analyzing the spatial patterns of marine population across no-take MPAs boundaries based on empirical data extracted from published papers.
+## The aim of this analysis is to describe the dominant spatial pattern of marine populations across MPA borders and to explore potential drivers of these patterns using GAMs (General Additive Models).
+
+# Upload packeges
+```{r setup, include=FALSE}
+library(ggplot2)
+library(vegan)
+library(tidyverse)
+library(dplyr)
+library(mgcv)
+library(nlme)
+library(qgam)
+library(rgl)
+library(mgcViz)
+library(gamair)
+library(janitor)
+library(car)
+library(AICcmodavg)
+library(gratia)
+library(lme4)
+library(gamm4)
+library(caret)
+library(mgcViz)
+library(SciViews)
+
+```
+
+# Code for AICc list
+```{r}
+AIC_GAM_F=function(gam_list){
+  AIC_df=data.frame(model_name=names(gam_list))
+  AIC_v=c()
+  for(i in 1:length(gam_list)){
+    AIC_df_n=AICc(gam_list[[i]])
+    AIC_v=c(AIC_v,AIC_df_n)
+  }
+  AIC_df$AICc=AIC_v
+  
+  #arrange and write the delta values
+  AIC_df = AIC_df %>% arrange(AICc) %>%
+    mutate(delta = AICc - first(AICc))
+  
+  return(AIC_df)
+}
+
+
+AIC_GAM_A=function(gam_list1){
+  AIC_df1=data.frame(model_name1=names(gam_list1))
+  AIC_v1=c()
+  for(i in 1:length(gam_list1)){
+    AIC_df_n1=AICc(gam_list1[[i]])
+    AIC_v1=c(AIC_v1,AIC_df_n1)
+  }
+  AIC_df1$AICc=AIC_v1
+  
+  #arrange and write the delta values
+  AIC_df1 = AIC_df1 %>% arrange(AICc) %>%
+    mutate(delta = AICc - first(AICc))
+  
+  return(AIC_df1)
+  
+}
+```
+
+# Uploading the dataset (MPA_spatial_dataset_2020_11_10.csv, unique_taxa_mobility_commercial_value_2020_11_10.csv) 
+# cleaning and arranging it for analysis
+
+```{r}
+# cleaning all the spaces and dots in column name and replacing them with "_"
+data <- clean_names(MPA_spatial_dataset_2020_11_10)
+
+# adding column with ln effect size
+  data <- data %>%
+    mutate(ln_effect_size=ln(value_out/value_in))
+  
+# adding a column with average years of protection
+data <- data %>% 
+   mutate(years_of_protection_avg=rowMeans(cbind(years_of_protection_min, years_of_protection_max), na.rm=T))
+
+# adding a column with number of samples for the weighting
+data$transects = data$sampling_sites*data$transects_per_site
+
+# adding columns with categories for reserve age and size
+data <- data %>% 
+  mutate(young_old=case_when(years_of_protection_avg<=10~"young", years_of_protection_avg >10 ~"old"))%>% 
+  mutate(small_big=case_when(no_take_size_km2<=3~"small", no_take_size_km2> 3 ~"large"))
+
+#adding acolumn of relative x axis
+data$relative_x = data$distance_from_reserve_border/-(data$distance_of_cntz_from_border)
+
+#merging with mobility and commercial value data 
+data <- merge(data, unique_taxa_mobility_commercial_value_2020_11_10, by= "taxonomic_group")
+
+#selecting only the variables needed for analysis
+data_for_gam <- data %>% 
+  dplyr::select(ln_effect_size, distance_from_reserve_border, taxonomic_group,reserve_name, years_of_protection_avg, no_take_size_km2, method, fish_invertebrate, transects, value_out, study_number, young_old, small_big,relative_x,site_code,distance_of_cntz_from_border,country, mobility_category, commercial_value, habitat_continuency_reported, quantitative_habitat_quality , zoning, enforcement,habitat, lat)
+
+# defining categorial values as factors
+data_for_gam$fish_invertebrate<- as.factor(data_for_gam$fish_invertebrate)
+data_for_gam$method<- as.factor(data_for_gam$method)
+data_for_gam$young_old<- as.factor(data_for_gam$young_old)
+data_for_gam$small_big<- as.factor(data_for_gam$small_big)
+data_for_gam$taxonomic_group<- as.factor(data_for_gam$taxonomic_group)
+data_for_gam$study_number<- as.factor(data_for_gam$study_number)
+data_for_gam$site_code<- as.factor(data_for_gam$site_code)
+data_for_gam$reserve_name<- as.factor(data_for_gam$reserve_name)
+data_for_gam$mobility_category<- as.factor(data_for_gam$mobility_category)
+data_for_gam$commercial_value<- as.factor(data_for_gam$commercial_value)
+data_for_gam$habitat_continuency_reported<- as.factor(data_for_gam$habitat_continuency_reported)
+data_for_gam$quantitative_habitat_quality<- as.factor(data_for_gam$quantitative_habitat_quality)
+data_for_gam$zoning<- as.factor(data_for_gam$zoning)
+data_for_gam$enforcement<- as.factor(data_for_gam$enforcement)
+data_for_gam$habitat<- as.factor(data_for_gam$habitat)
+
+```
+
+#cheacking that my data is normally distributed
+```{r}
+hist(data_for_gam$ln_effect_size, breaks=100, xlim=c(-7, 7))
+```
+
+# Basic GAM model for the entire dataset
+## The model selection process for fixed and random effects is found at the and of the code
+
+```{r}
+# A basic model only with random effect so we have a model to compare with the AICc
+gam_model_full_data_random_effect <- gam(ln_effect_size ~ s(site_code, bs="re")  , data = data_for_gam, family= "gaussian", method = "REML",weights = log(transects+1))
+                            
+summary(gam_model_full_data_random_effect)
+AICc(gam_model_full_data_random_effect)
+
+# Model with distance as main predictor + random effect 
+gam_model_distance_full_data <- gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+s(site_code, bs="re"), data = data_for_gam, family= "gaussian", method = "REML",weights = log(transects+1))
+                            
+summary(gam_model_distance_full_data)
+AICc(gam_model_distance_full_data)
+gam.check(gam_model_distance_full_data)
+
+intercept1 <- gam_model_distance_full_data$coefficients[["(Intercept)"]]
+
+# Plotting the model for the entire range
+plot.gam(gam_model_distance_full_data, shift = intercept1, shade=T, select=1, xlab='', ylab='', cex.axis=1.6,  ylim=c(-4,2))
+abline(v=c(-1050,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(-0.4, 0, 0.07), col="blue")
+
+
+
+# Plotting the model with zoom in to the border area (distance between: -3000,6000)
+plot.gam(gam_model_distance_full_data, shift = intercept1, shade=T, select=1, xlab='', ylab='', cex.axis=1.6, xlim=c(-3000,6000), ylim=c(-2.5,1))
+abline(v=c(-1050,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(-0.5, -0.38, 0, 0.07), col="blue")
+
+```
+
+# Basic GAM model only for data within MPAs 
+```{r}
+full_data_inside<- data_for_gam %>% 
+  filter(distance_from_reserve_border<=(0))
+
+# A basic model only with random effect so we have a model to compare with the AICc
+gam_model_random_effect_full_data_inside <- gam(ln_effect_size ~ s(site_code, bs="re"), data = full_data_inside, family= "gaussian", method = "REML",weights = log(transects+1))
+                            
+              
+summary(gam_model_random_effect_full_data_inside)
+AICc(gam_model_random_effect_full_data_inside)
+gam.check(gam_model_random_effect_full_data_inside)
+
+# Model with distance as main predictor + random effect
+
+gam_model_distance_full_data_inside <- gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+s(site_code, bs="re"), data = full_data_inside, family= "gaussian", method = "REML",weights = log(transects+1))
+                            
+              
+summary(gam_model_distance_full_data_inside)
+AICc(gam_model_distance_full_data_inside)
+intercept2 <- gam_model_distance_full_data_inside$coefficients[["(Intercept)"]]
+
+# Plotting the model for the entire range
+plot.gam(gam_model_distance_full_data_inside, shift = intercept2, shade=T, select=1, xlab='', ylab='', cex.axis=1.6)
+abline(v=c(-1500,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(-0.7, 0), col="blue")
+
+
+# Plotting the model and zooming in to border area (-3000,0)
+plot.gam(gam_model_distance_full_data_inside, shift = intercept2, shade=T, select=1, xlab='', ylab='', cex.axis=1.6, xlim=c(-3000,0), ylim=c(-1,0.5))
+abline(v=c(-1500,0),  col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(-0.7,0), col="blue")
+
+```
+
+# We want to examine the effect of various predictors on the spatial pattern across MPAs borders.
+# First, I will subset the data to distances of (-3000,+6000), where the majority of data is concentrated, and remove extreme ES values
+```{r}
+data_for_gam_subset<- data_for_gam %>% 
+  filter(!abs(ln_effect_size)>(7)) %>% #filtering effect size greater then abs(+-3)
+  filter(distance_from_reserve_border<=(6000)) %>% # datapoints far from border outside the MPA
+  filter(distance_from_reserve_border>=(-3000))  # datapoints far from border within the MPA
+    
+data_inside_reserve<- data_for_gam_subset %>% 
+ filter(distance_from_reserve_border<=(0)) 
+
+data_cutted<-data_for_gam %>% 
+  filter(!distance_from_reserve_border>(-3000)) 
+  
+```
+
+# some data exploratory
+```{r}
+#how many datapoints in each category
+summary.factor(data_for_gam_subset$commercial_value)
+summary.factor(data_for_gam_subset$fish_invertebrate)
+summary.factor(data_for_gam_subset$enforcement)
+summary.factor(data_for_gam_subset$zoning)
+summary.factor(data_for_gam_subset$mobility_category)
+summary.factor(data_for_gam_subset$young_old)
+summary.factor(data_for_gam_subset$small_big)
+summary.factor(data_for_gam_subset$habitat)
+summary.factor(data_for_gam_subset$habitat_continuency_reported)
+summary.factor(data_for_gam_subset$quantitative_habitat_quality)
+
+#how many unique samples in each category
+MPAs<- as.data.frame(unique(data_for_gam_subset$reserve_name))
+country <-as.data.frame(unique(data_for_gam_subset$country))
+samples <- as.data.frame(unique(data_for_gam_subset$site_code))
+taxa <- as.data.frame(unique(data_for_gam_subset$taxonomic_group))
+paper<- as.data.frame(unique(MPA_spatial_dataset_2020_11_10$paper_title))
+age_min<- as.data.frame(unique(MPA_spatial_dataset_2020_11_10$years_of_protection_min))
+age_max<- as.data.frame(unique(MPA_spatial_dataset_2020_11_10$years_of_protection_max))
+size<- as.data.frame(unique(data_for_gam_subset$no_take_size_km2))
+range_min <- min(MPA_spatial_dataset_2020_11_10$distance_from_reserve_border)
+range_max <- max(MPA_spatial_dataset_2020_11_10$distance_from_reserve_border)
+
+# exploring fish samples
+data_fish<- data_for_gam_subset %>% 
+   filter(fish_invertebrate=="fish")
+
+samples_fish<- as.data.frame(unique(data_fish$site_code))
+
+taxa_fish<- as.data.frame(unique(data_fish$taxonomic_group))
+
+#checking confounding factors with age and size
+large_mpa_fish<- data_fish  %>% 
+   filter(small_big=="large")
+summary.factor(large_mpa_fish$young_old)
+
+small_mpa_fish<- data_fish  %>% 
+   filter(small_big=="small")
+summary.factor(small_mpa_fish$young_old)
+
+# exploring invertebrates samples 
+data_invertebrate <- data_for_gam_subset %>% 
+   filter(fish_invertebrate=="invertebrate")
+
+samples_invertebrate<- as.data.frame(unique(data_invertebrate$site_code))
+
+taxa_invertebrate<- as.data.frame(unique(data_invertebrate$taxonomic_group))
+
+#checking confounding factors with age and size
+
+large_mpa_invartebrate<- data_invertebrate  %>% 
+   filter(small_big=="large")
+summary.factor(large_mpa_invartebrate$young_old)
+
+small_mpa_invartebrate<- data_invertebrate  %>% 
+   filter(small_big=="small")
+summary.factor(small_mpa_invartebrate$young_old)
+
+
+# sessile samples  
+data_sessile <- data_for_gam_subset %>% 
+   filter(mobility_category=="sessile")
+
+samples_sessile <- as.data.frame(unique(data_sessile$site_code))
+
+# sedentary samples  
+data_sedentary <- data_for_gam_subset %>% 
+   filter(mobility_category=="sedentary")
+
+samples_sedentary <- as.data.frame(unique(data_sedentary$site_code))
+
+# mobile samples 
+data_mobile <- data_for_gam_subset %>% 
+   filter(mobility_category=="mobile")
+
+samples_mobile <- as.data.frame(unique(data_mobile$site_code))
+
+# commercial samples 
+data_commercial <- data_for_gam_subset %>% 
+   filter(commercial_value=="commercial")
+
+samples_commercial <- as.data.frame(unique(data_commercial$site_code))
+
+# non commercial samples 
+data_non_commercial <- data_for_gam_subset %>% 
+   filter(commercial_value=="non commercial")
+
+samples_non_commercial <- as.data.frame(unique(data_non_commercial$site_code))
+
+# buffer zone samples 
+buffer_zone <- data_for_gam_subset %>% 
+   filter(zoning=="NTZ-BZ-UP") 
+sample_buffer_zone<- as.data.frame(unique(buffer_zone$site_code))
+
+# no buffer zone samples 
+no_buffer_zone <- data_for_gam_subset %>% 
+   filter(zoning=="NTZ-UP") 
+sample_no_buffer_zone<- as.data.frame(unique(no_buffer_zone$site_code))
+
+# old MPAs
+old_mpa<- data_for_gam_subset %>% 
+   filter(young_old=="old") 
+sample_old_mpa<- as.data.frame(unique(old_mpa$site_code))
+
+# young MPAs
+young_mpa<- data_for_gam_subset %>% 
+   filter(young_old=="young") 
+sample_young_mpa<- as.data.frame(unique(young_mpa$site_code))
+
+# small MPAs
+small_mpa<- data_for_gam_subset %>% 
+   filter(small_big=="small") 
+sample_small_mpa<- as.data.frame(unique(small_mpa$site_code))
+
+# large MPAs
+large_mpa<- data_for_gam_subset %>% 
+   filter(small_big=="large") 
+sample_large_mpa<- as.data.frame(unique(large_mpa$site_code))
+
+```
+
+# Calculating the medians for reserve age and size
+```{r}
+#size
+data_median_size <- data_for_gam_subset$no_take_size_km2
+data_median_size <- data_median_size[!is.na(data_median_size)]
+
+median(data_median_size)
+mean(data_median_size)
+
+MPA_size<- unique(data_median_size)
+
+median(MPA_size)
+mean(MPA_size)
+
+summary.factor(data_for_gam_subset$small_big)
+
+#age
+data_median_age <- data_for_gam_subset$years_of_protection_avg 
+data_median_age <- data_median_age[!is.na(data_median_age)]
+
+median(data_median_age)
+mean(data_median_age)
+
+MPA_age <-unique(data_median_age)
+
+median(MPA_age)
+mean(MPA_age)
+
+summary.factor(data_for_gam_subset$young_old)
+
+```
+
+#  GAM model with the subset data (-3000 to 6000 m) 
+```{r}
+#only random effect
+gam_model_subset_random_effect <- gam(ln_effect_size ~ s(site_code, bs="re"), data = data_for_gam_subset, family= "gaussian", method = "REML",weights = log(transects+1))
+                            
+summary(gam_model_subset_random_effect)
+AICc(gam_model_subset_random_effect)
+
+
+#Distance+ random effect
+gam_model_distance <- gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+s(site_code, bs="re"), data = data_for_gam_subset, family= "gaussian", method = "REML",weights = log(transects+1))
+                            
+summary(gam_model_distance)
+AICc(gam_model_distance)
+gam.check(gam_model_distance)
+
+intercept3 <- gam_model_distance$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_model_distance, shift = intercept3, shade=T, select=1, xlab='', ylab='', cex.axis=1.6, xlim=c(-3000,6000), ylim=c(-3,2), bty="n")
+abline(v=c(-1000,0),  col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(0, -0.8), col="blue")
+
+
+
+plot.gam(gam_model_distance, shift = intercept3, shade=T, select=1, xlab='', ylab='', cex.axis=1.6, xlim=c(-3000,6000), ylim=c(-3,2), residuals=T, cex = .7, pch=1, bty="n", se=T)
+abline(v=c(-1000,0),  col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(0, -0.8), col="blue")
+
+
+
+```
+
+# Validation for the spatial pattern: GAM model with different GAM parameters
+```{r}
+
+# different K value (k=20)
+gam_model_different_k20 <- gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad",  k=20)+s(site_code, bs="re"), data = data_for_gam_subset, family= "gaussian", method = "REML", weights = log(transects+1))
+
+summary(gam_model_different_k20)
+AICc(gam_model_different_k20)
+gam.check(gam_model_different_k20)
+
+intercept4 <- gam_model_different_k20$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_model_different_k20, shift = intercept4, shade=T,select=1,  ylab='' ,xlab='', cex.axis=1.6, ylim = c(-3,2), bty="n")
+abline(v=c(-1000,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0)
+
+
+# different K value (k=50)
+
+gam_model_different_k50 <- gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad",  k=50)+s(site_code, bs="re"), data = data_for_gam_subset, family= "gaussian", method = "REML", weights = log(transects+1))
+
+summary(gam_model_different_k50)
+AICc(gam_model_different_k50)
+gam.check(gam_model_different_k50)
+
+intercept5 <- gam_model_different_k50$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_model_different_k50, shift = intercept5, shade=T,select=1,  ylab='' ,xlab='', cex.axis=1.6, ylim = c(-3,2), bty="n")
+abline(v=c(-1000,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0)
+
+
+# different smoother (bs="tp")
+gam_model_different_smoother <- gam(ln_effect_size ~ s(distance_from_reserve_border, bs="tp")+s(site_code, bs="re"), data = data_for_gam_subset, family= "gaussian", method = "REML", weights = log(transects+1))
+
+summary(gam_model_different_smoother)
+AICc(gam_model_different_smoother)
+gam.check(gam_model_different_smoother)
+
+intercept6 <- gam_model_different_smoother$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_model_different_smoother, shift = intercept6, shade=T,select=1,  ylab='' ,xlab='', cex.axis=1.6, ylim = c(-3,2), bty="n")
+abline(v=c(-900,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0)
+
+
+# no weighting
+gam_model_no_weights <- gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+s(site_code, bs="re"), data = data_for_gam_subset, family= "gaussian", method = "REML")
+
+summary(gam_model_no_weights)
+AICc(gam_model_no_weights)
+gam.check(gam_model_no_weights)
+
+intercept7 <- gam_model_no_weights$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_model_no_weights, shift = intercept7, shade=T,select=1,  ylab='' ,xlab='', cex.axis=1.6, ylim = c(-3,2), bty="n")
+abline(v=c(-1000,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0)
+
+
+```
+
+# Validation for the satial pattern: GAM model with the real values (biomass/density/CPUE) as response variable
+```{r}
+
+gam_model_real_values <- gam(ln(value_out) ~ s(distance_from_reserve_border, bs = "ad")+s(site_code, bs="re"), data = data_for_gam_subset, family= "gaussian", method = "REML",weights = log(transects+1))
+
+summary(gam_model_real_values)
+AICc(gam_model_real_values)
+gam.check(gam_model_real_values)
+
+intercept8 <- gam_model_real_values$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_model_real_values, shift = intercept8, shade=T,select=1,  ylab='' ,xlab='', cex.axis=1.6, ylim = c(-1,4), bty="n")
+abline(v=c(-1100,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(2.4, 1.6))
+
+
+```
+
+
+# validations: presenting GAM model with relative X axis
+```{r}
+
+gam_model_relative_x <- gam(ln_effect_size ~ s(relative_x, bs = "ad")+s(site_code, bs="re"), data = data_for_gam_subset, family= "gaussian",method = "REML",weights = log(transects+1))
+
+summary(gam_model_relative_x)
+AICc(gam_model_relative_x)
+gam.check(gam_model_relative_x)
+
+intercept9 <- gam_model_relative_x$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_model_relative_x, shift = intercept9, shade=T, select=1, xlab='', ylab='', cex.axis=1.6, ylim = c(-2,1),xlim = c(-1,10), bty="n")
+abline(v=c(-0.5, 0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0)
+
+
+```
+
+
+### Examining how different predictors (protection, buffer zone, taxa etc.) affect the spatial pattern across MPA borders.
+
+# GAM model examining the effect of enforcement
+```{r}
+summary.factor(data_for_gam_subset$enforcement)
+
+# enforcet
+enforcement_yes<- data_for_gam_subset %>% 
+  filter(enforcement=="yes") 
+
+summary.factor(enforcement_yes$fish_invertebrate)
+summary.factor(enforcement_yes$small_big)
+summary.factor(enforcement_yes$young_old)
+
+
+MPA_enforcement_yes<- as.data.frame(unique(enforcement_yes$reserve_name))
+MPA_enforcement_yes
+MPA_enforcement_yes_site_code<- as.data.frame(unique(enforcement_yes$site_code))
+MPA_enforcement_yes_site_code
+
+
+# no enforcement
+enforcement_no<- data_for_gam_subset %>% 
+  filter(enforcement=="no") 
+
+summary.factor(enforcement_no$fish_invertebrate)
+summary.factor(enforcement_no$small_big)
+summary.factor(enforcement_no$young_old)
+
+MPA_enforcement_no<- as.data.frame(unique(enforcement_no$reserve_name))
+MPA_enforcement_no
+
+MPA_enforcement_no_site_code<- as.data.frame(unique(enforcement_no$site_code))
+MPA_enforcement_no_site_code
+
+
+# distance by enforcement
+gam_enforcement <- gam(ln_effect_size ~ s(distance_from_reserve_border, by=enforcement, bs = "ad")+s(site_code, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_enforcement)
+AICc(gam_enforcement)
+gam.check(gam_enforcement)
+
+intercept10<- gam_enforcement$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_enforcement, shift = intercept10, shade=T,select=1,ylab='' ,xlab='',ylim=c(-3,2), cex.axis=1.6, bty="n")
+abline(v=c(-1300,0),  col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(0, -0.8)) 
+
+
+plot.gam(gam_enforcement, shift = intercept10, shade=T,select=2 ,ylab='' ,xlab='',ylim=c(-3,2), cex.axis=1.6, bty="n")
+abline(v=c(-500,0),  col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(0, -0.75))
+
+
+```
+
+# lest try to examine the effect of enforcement level only for fish data  (and without the non commercial taxa). 
+# This will allow us to evoid confusion with the clear effect of taxa (fish/invertebrate) and commercial value
+
+```{r}
+data_commercial_fish<- data_for_gam_subset %>% 
+   filter(fish_invertebrate=="fish") %>% 
+   filter(!commercial_value=="non commercial")
+```
+
+# GAM model for commercial Fish data only by distance. We will compare the AICc of interaction models to this AICc model.
+```{r}
+gam_model_commercial_fish <- gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+s(site_code, bs="re"), data = data_commercial_fish, method = "REML", weights = log(transects+1))
+
+summary(gam_model_commercial_fish)
+AICc(gam_model_commercial_fish)
+gam.check(gam_model_commercial_fish)
+
+intercept11 <- gam_model_commercial_fish$coefficients[["(Intercept)"]]
+
+plot.gam(gam_model_commercial_fish, shift = intercept11, shade=T, select=1, cex.axis=1.6, bty="n", xlab='', ylab='')
+abline(v=c(-1250,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(-0.3, 0))
+
+```
+# GAM model examining the effect of enforcement- only for commercial fish data, to eliminate invertebrate pattern
+
+```{r}
+
+gam_enforcement_fish <- gam(ln_effect_size ~ s(distance_from_reserve_border, by=enforcement, bs = "ad")+s(site_code, bs="re"), data =  data_commercial_fish, method = "REML",weights = log(transects+1))
+
+summary(gam_enforcement_fish)
+AICc(gam_enforcement_fish)
+gam.check(gam_enforcement_fish)
+
+intercept12<- gam_enforcement_fish$coefficients[["(Intercept)"]]
+
+plot.gam(gam_enforcement_fish, shift = intercept12, shade=T,select=1,ylab='' ,xlab='',ylim=c(-3, 2), cex.axis=1.6, bty="n")
+abline(v=c(-1200,0),  col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+abline(h=0) 
+
+plot.gam(gam_enforcement_fish, shift = intercept12, shade=T,select=2 ,ylab='' ,xlab='',ylim=c(-3, 2), cex.axis=1.6, bty="n")
+abline(v=c(-1500,0),  col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+abline(h=0)
+
+```
+
+# GAM model examining the effect of buffer zone around the no-take zone
+
+```{r}
+
+gam_zoning <- gam(ln_effect_size ~ s(distance_from_reserve_border, by=zoning, bs = "ad")+s(site_code, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_zoning)
+AICc(gam_zoning)
+gam.check(gam_zoning)
+
+intercept13 <- gam_zoning$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_zoning, shift = intercept13, shade=T,select=1,ylim=c(-3, 2), ylab='' ,xlab='', cex.axis=1.6, bty="n")
+abline(v=0, col="#00729f",  lty=1, lwd= 3)
+#abline(h=0) 
+#dev.off ()
+
+
+plot.gam(gam_zoning, shift = intercept13, shade=T,select=2, ylim=c(-3, 2), ylab='' ,xlab='', cex.axis=1.6, bty="n")
+abline(v=c(-600,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0)
+
+
+```
+
+# Most of the MPAs with buffer zones are very small
+#GAM model examining the effect of buffer zone around the no-take zone only in small MPAs
+
+```{r}
+
+#first creating a data only of small MPAs
+data_small_MPA<- data_for_gam_subset %>% 
+  filter(small_big=="small")
+
+summary.factor(data_small_MPA$zoning)
+
+data_small_MPA_samples<- as.data.frame(unique(data_small_MPA$site_code))
+data_small_MPA_samples
+
+#basic model for comparison
+gam_distance_smallMPA <- gam(ln_effect_size ~ s(distance_from_reserve_border,bs = "ad")+s(site_code, bs="re"), data = data_small_MPA, method = "REML",weights = log(transects+1))
+
+summary(gam_distance_smallMPA)
+AICc(gam_distance_smallMPA)
+gam.check(gam_distance_smallMPA)
+
+
+# distance by zoning 
+gam_distance_smallMPA_by_zoning <- gam(ln_effect_size ~ s(distance_from_reserve_border, by=zoning, bs = "ad")+s(site_code, bs="re"), data = data_small_MPA, method = "REML",weights = log(transects+1))
+
+summary(gam_distance_smallMPA_by_zoning)
+AICc(gam_distance_smallMPA_by_zoning)
+gam.check(gam_distance_smallMPA_by_zoning)
+
+intercept14<- gam_distance_smallMPA_by_zoning$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_distance_smallMPA_by_zoning, shift = intercept14, shade=T,select=1, xlab='', ylab='', cex.axis=1.6, ylim = c(-3,2),xlim = c(-3000, 6000), bty="n")
+abline(v=0, col="#00729f",  lty=1, lwd=3)
+#abline(h=0)
+
+
+plot.gam(gam_distance_smallMPA_by_zoning, shift = intercept14, shade=T,select=2, xlab='', ylab='', cex.axis=1.6, ylim = c(-3,2), xlim = c(-3000, 6000), bty="n")
+abline(v=c(-500,0), col=c("#E10600FF", "#00729f"), lty=c(2,1), lwd=c(3, 3))
+#abline(h=0)
+
+```
+
+#GAM model examining the effect of buffer zone around the no-take zone only for commercial-fish
+
+```{r}
+
+gam_zoning_commercial_fish <- gam(ln_effect_size ~ s(distance_from_reserve_border, by=zoning, bs = "ad")+s(site_code, bs="re"), data = data_commercial_fish, method = "REML",weights = log(transects+1))
+
+
+summary(gam_zoning_commercial_fish)
+AICc(gam_zoning_commercial_fish)
+gam.check(gam_zoning_commercial_fish)
+
+intercept15<- gam_zoning_commercial_fish$coefficients[["(Intercept)"]]
+
+plot.gam(gam_zoning_commercial_fish, shift = intercept15, shade=T,select=1, xlab='', ylab='', cex.axis=1.6, ylim = c(-3,2),xlim = c(-3000, 6000), bty="n")
+abline(v=0, col="#00729f",  lty=1, lwd=3)
+#abline(h=0)
+
+
+plot.gam(gam_zoning_commercial_fish, shift =intercept15, shade=T,select=2, xlab='', ylab='', cex.axis=1.6, ylim = c(-3,2), xlim = c(-3000, 6000), bty="n")
+abline(v=c(-1200,0), col=c("#E10600FF", "#00729f"), lty=c(2,1), lwd=c(3, 3))
+#abline(h=0)
+
+
+```
+
+# GAM model allowing the distance to change by commercial value (commercial/non commercial)
+```{r}
+gam_model_commercial_value <- gam(ln_effect_size ~ s(distance_from_reserve_border,  by=commercial_value, bs="fs") +s(site_code, bs="re"), data = data_for_gam_subset, method = "REML", weights = log(transects+1))
+
+summary(gam_model_commercial_value)
+AICc(gam_model_commercial_value)
+gam.check(gam_model_commercial_value)
+
+intercept16<- gam_model_commercial_value$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_model_commercial_value, shift = intercept16, shade=T, select=1, cex.axis=1.6,xlab='', ylab='', xlim=c(-3000, 6000), ylim=c(-3,2), bty="n")
+abline(v=c(-700,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(2, 2))
+#abline(h=c(0, -0.8))
+
+
+
+plot.gam(gam_model_commercial_value, shift = intercept16, shade=T, select=2, xlab='', ylab='', cex.axis=1.6, xlim=c(-3000, 6000),ylim=c(-3,2), bty="n")
+abline(v=0, col=  "#00729f", lwd=2)
+
+
+```
+
+
+#GAM model allowing the distance to change by taxa (fish/invertebrates)
+
+```{r}
+gam_model_by_fish_inv <- gam(ln_effect_size ~ s(distance_from_reserve_border, by=fish_invertebrate, bs="ad")+s(site_code, bs="re"), data = data_for_gam_subset, method = "REML", weights = log(transects+1))
+
+summary(gam_model_by_fish_inv)
+AICc(gam_model_by_fish_inv)
+gam.check(gam_model_by_fish_inv)
+
+intercept17 <- gam_model_by_fish_inv$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_model_by_fish_inv , shift = intercept17, shade=T, select=1, xlab='', ylab='', cex.axis=1.6, ylim = c(-3,2), xlim =c(-3000,6000), bty="n")
+abline(v=c(-1500,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(2, 2))
+#abline(h=c(0, -0.7))
+
+
+
+plot.gam(gam_model_by_fish_inv , shift = intercept17, shade=T, select=2, xlab='', ylab='', cex.axis=1.6, ylim = c(-3,2), xlim =c(-3000,6000), bty="n")
+abline(v=c(-400,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(2, 2))
+#abline(h=c(0, -1.1))
+
+
+```
+
+
+
+# GAM model allowing the distance to change by mobility category (sessile/sedentary/mobile)
+# we will first remove the non-commercial taxa, as they present equale distibution in and outside the MPAs and can mask the effect of mobility 
+```{r}
+#removing the non-commercial taxa, as they present equale distibution in and outside the MPAs and can mask the effect of mobility 
+
+data_commercial<- data_for_gam_subset %>% 
+filter(commercial_value=="commercial")
+
+summary.factor(data_commercial$mobility_category)
+
+samples_data_commercial<- as.data.frame(unique(data_commercial$site_code))
+samples_data_commercial
+
+#mobile
+data_mobile<- data_commercial %>% 
+filter(mobility_category=="mobile")
+samples_data_mobile<- as.data.frame(unique(data_mobile$site_code))
+samples_data_mobile
+
+#sedentary
+data_sedentary<- data_commercial %>% 
+filter(mobility_category=="sedentary")
+samples_data_sedentary<- as.data.frame(unique(data_sedentary$site_code))
+samples_data_sedentary
+
+#sessile
+data_sessile<- data_commercial %>% 
+filter(mobility_category=="sessile")
+samples_data_sessile<- as.data.frame(unique(data_sessile$site_code))
+samples_data_sessile
+
+#basic model for comparison
+gam_model_commercial_data <- gam(ln_effect_size ~ s(distance_from_reserve_border,bs = "ad")+s(site_code, bs="re"), data = data_commercial, method = "REML",weights = log(transects+1))
+
+summary(gam_model_commercial_data)
+AICc(gam_model_commercial_data)
+
+# model of distance by mobility 
+gam_model_by_mobility <- gam(ln_effect_size ~ s(distance_from_reserve_border, by=mobility_category, bs = "ad")+s(site_code, bs="re"), data = data_commercial, method = "REML",weights = log(transects+1))
+
+summary(gam_model_by_mobility)
+AICc(gam_model_by_mobility)
+gam.check(gam_model_by_mobility)
+
+intercept18 <- gam_model_by_mobility$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_model_by_mobility, shift = intercept18, shade=T, select=1, cex.axis=1.6, bty="n", ylim=c(-3,2), xlim = c(-2000,2000), xlab='', ylab='')
+abline(v=c(-1500,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0)
+
+
+plot.gam(gam_model_by_mobility, shift = intercept18, shade=T, select=2, cex.axis=1.6, bty="n", ylim=c(-3,2), xlim = c(-2000,2000), xlab='', ylab='')
+abline(v=c(-380,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0)
+
+
+
+plot.gam(gam_model_by_mobility, shift = intercept18, shade=T,select=3, cex.axis=1.6, bty="n", ylim=c(-3,2), xlim = c(-2000,2000), xlab='', ylab='')
+abline(v=c(-150,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0)
+
+```
+
+
+# GAM model examining the effect of habitat: coral reef versus temperate rocky reef.
+```{r}
+summary.factor(data_for_gam_subset$habitat)
+
+# we will remove the segrass as it is present only in one sample
+data_habitat<- data_for_gam_subset %>% 
+  filter(!habitat=="Posidonia beds")
+
+summary.factor(data_habitat$habitat)
+
+#explore the data
+
+# coral reef
+
+data_coral_reef <- data_habitat %>% 
+  filter(habitat =="coral reef")  
+
+summary.factor(data_coral_reef$fish_invertebrate)
+summary.factor(data_coral_reef$small_big)
+summary.factor(data_coral_reef$young_old)
+
+samples_coral_reef<- as.data.frame(unique(data_coral_reef$site_code))
+study_coral_reef<- as.data.frame(unique(data_coral_reef$study_number))
+MPA_coral_reef<- as.data.frame(unique(data_coral_reef$reserve_name))
+
+samples_coral_reef
+study_coral_reef
+MPA_coral_reef
+
+# temperate rocky reef
+data_temperate_rocky_reef  <- data_habitat %>% 
+  filter(habitat =="temperate rocky reef")  
+
+summary.factor(data_temperate_rocky_reef$fish_invertebrate)
+summary.factor(data_temperate_rocky_reef$small_big)
+summary.factor(data_temperate_rocky_reef$young_old)
+
+samples_temperate_rocky_reef<- as.data.frame(unique(data_temperate_rocky_reef$site_code))
+study_temperate_rocky_reef<- as.data.frame(unique(data_temperate_rocky_reef$study_number))
+MPA_temperate_rocky_reef<- as.data.frame(unique(data_temperate_rocky_reef$reserve_name))
+
+samples_temperate_rocky_reef
+study_temperate_rocky_reef
+MPA_temperate_rocky_reef
+
+
+#basic model for comparison
+gam_habitat <- gam(ln_effect_size ~  s(distance_from_reserve_border, bs = "ad")+ s(site_code, bs="re"), data = data_habitat, method = "REML",weights = log(transects+1))
+
+summary(gam_habitat)
+AICc(gam_habitat)
+
+# distance by habitat
+gam_habitat_type <- gam(ln_effect_size ~ s(distance_from_reserve_border, by=habitat, bs = "ad")+s(site_code, bs="re"), data = data_habitat, method = "REML",weights = log(transects+1))
+
+summary(gam_habitat_type)
+AICc(gam_habitat_type)
+gam.check(gam_habitat_type)
+
+intercept19 <- gam_habitat_type$coefficients[["(Intercept)"]]
+
+
+
+plot.gam(gam_habitat_type, shift = intercept19, shade=T,select=1, ylim=c(-3, 2), ylab='' ,xlab='', cex.axis=1.6, bty="n")
+abline(v=c(-1300,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0) 
+
+plot.gam(gam_habitat_type, shift = intercept19, shade=T,select=2, ylim=c(-3,2), ylab='' ,xlab='', cex.axis=1.6, bty="n")
+abline(v=c(-500,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0) 
+
+
+
+```
+
+
+# How is the data distributed bewtween studies that report habitat continuency or not
+```{r}
+
+summary.factor(data_for_gam_subset$habitat_continuency_reported) 
+
+#habitat_continuency
+habitat_continuency<- data_for_gam_subset %>% 
+  filter(habitat_continuency_reported=="yes") 
+
+samples_habitat_continuency<- as.data.frame(unique(habitat_continuency$site_code))
+MPA_habitat_continuency<- as.data.frame(unique(habitat_continuency$reserve_name))
+studies_habitat_continuency<- as.data.frame(unique(habitat_continuency$study_number))
+
+studies_habitat_continuency
+samples_habitat_continuency
+MPA_habitat_continuency
+
+#no_habitat_continuency
+no_habitat_continuency<- data_for_gam_subset %>% 
+  filter(habitat_continuency_reported=="no") 
+
+studies_no_habitat_continuency<- as.data.frame(unique(no_habitat_continuency$study_number))
+MPA_no_habitat_continuency<- as.data.frame(unique(no_habitat_continuency$reserve_name))
+samples_no_habitat_continuency<- as.data.frame(unique(no_habitat_continuency$site_code))
+
+studies_no_habitat_continuency
+MPA_no_habitat_continuency
+samples_no_habitat_continuency
+```
+
+# GAM model examining the effect of habitat continuency
+```{r}
+
+gam_model_habitat_continuency <- gam(ln_effect_size ~ s(distance_from_reserve_border, by=habitat_continuency_reported, bs = "ad")+s(site_code, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_habitat_continuency)
+AICc(gam_model_habitat_continuency)
+gam.check(gam_model_habitat_continuency)
+
+intercept20<- gam_model_habitat_continuency$coefficients[["(Intercept)"]]
+
+ 
+plot.gam(gam_model_habitat_continuency, shift = intercept20, shade=T,select=1,ylim=c(-3, 2), ylab='' ,xlab='', cex.axis=1.6, bty="n")
+abline(v=c(-600,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0) 
+
+plot.gam(gam_model_habitat_continuency, shift = intercept20, shade=T,select=2,ylim=c(-3, 2), ylab='' ,xlab='', cex.axis=1.6, bty="n")
+abline(v=c(-1000,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0)
+
+
+```
+
+# How is the data distributed bewtween studies that quantitatively controled for habitat quality or not
+
+```{r}
+#how is the data distributed bewtween studies that quantitatively controled for habitat quality
+summary.factor(data_for_gam_subset$quantitative_habitat_quality)
+
+#controlled
+quantitative_habitat_quality<- data_for_gam_subset %>% 
+  filter(quantitative_habitat_quality=="yes") 
+
+study_habitat_quality_yes<- as.data.frame(unique(quantitative_habitat_quality$study_number))
+MPA_habitat_quality_yes<- as.data.frame(unique(quantitative_habitat_quality$reserve_name))
+samples_habitat_quality_yes<- as.data.frame(unique(quantitative_habitat_quality$site_code))
+
+study_habitat_quality_yes
+MPA_habitat_quality_yes
+samples_habitat_quality_yes
+
+summary.factor(quantitative_habitat_quality$fish_invertebrate)
+summary.factor(quantitative_habitat_quality$small_big)
+summary.factor(quantitative_habitat_quality$young_old)
+
+#didnt controlled  
+no_quantitative_habitat_quality<- data_for_gam_subset %>% 
+  filter(quantitative_habitat_quality=="no") 
+ 
+study_habitat_quality_no<- as.data.frame(unique( no_quantitative_habitat_quality$study_number))
+MPA_habitat_quality_no<- as.data.frame(unique(no_quantitative_habitat_quality$reserve_name))
+samples_habitat_quality_no<- as.data.frame(unique( no_quantitative_habitat_quality$site_code))
+
+study_habitat_quality_no
+MPA_habitat_quality_no
+samples_habitat_quality_no
+
+summary.factor(no_quantitative_habitat_quality$fish_invertebrate)
+summary.factor(no_quantitative_habitat_quality$small_big)
+summary.factor(no_quantitative_habitat_quality$young_old)
+
+```
+
+# GAM model examining the effect of quantitative habitat quality 
+
+```{r} 
+gam_quantitative_habitat_control <- gam(ln_effect_size ~ s(distance_from_reserve_border, by=quantitative_habitat_quality, bs = "ad")+s(site_code, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_quantitative_habitat_control)
+AICc(gam_quantitative_habitat_control)
+gam.check(gam_quantitative_habitat_control)
+
+intercept21<- gam_quantitative_habitat_control$coefficients[["(Intercept)"]]
+
+
+
+plot.gam(gam_quantitative_habitat_control, shift = intercept21, shade=T,select=1,ylab='' ,xlab='',ylim=c(-3, 2), cex.axis=1.6, bty="n")
+abline(v=c(-700,0),  col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0) 
+
+plot.gam(gam_quantitative_habitat_control, shift = intercept21, shade=T,select=2 ,ylab='' ,xlab='',ylim=c(-3, 2), cex.axis=1.6, bty="n")
+abline(v=c(-400,0),  col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0)
+
+
+```
+
+
+
+# GAM model allowing the distance to change by MPA size (small< 3km^2 or big >3 km^2)
+
+```{r}
+
+gam_model_distance_by_size<- gam(ln_effect_size ~ s(distance_from_reserve_border,  by=small_big ,bs ="ad")+s(site_code, bs="re"), data =  data_for_gam_subset, method = "REML", weights = log(transects+1))
+ 
+
+summary(gam_model_distance_by_size)
+AICc(gam_model_distance_by_size)
+gam.check(gam_model_distance_by_size)
+
+intercept22 <-  gam_model_distance_by_size$coefficients[["(Intercept)"]]
+
+plot.gam(gam_model_distance_by_size, shift = intercept22, shade=T, select=1, cex.axis=1.6, bty="n", xlab='', ylab='', ylim=c(-3, 2)) 
+abline(v=c(-1000,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(-0.4, 0))
+
+plot.gam(gam_model_distance_by_size, shift = intercept22, shade=T, select=2, cex.axis=1.6, bty="n", xlab='', ylab='', ylim=c(-3, 2)) 
+abline(v=c(-1800,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(-0.4, 0))
+
+```
+
+
+
+# GAM model allowing the distance to change by MPA age (young < 10 Y or old >10 Y)
+```{r}
+gam_model_distance_by_age<- gam(ln_effect_size ~ s(distance_from_reserve_border,  by=young_old ,bs ="ad")+s(site_code, bs="re"), data =  data_for_gam_subset, method = "REML", weights = log(transects+1))
+ 
+
+summary(gam_model_distance_by_age)
+AICc(gam_model_distance_by_age)
+gam.check(gam_model_distance_by_age)
+
+intercept23 <-  gam_model_distance_by_age$coefficients[["(Intercept)"]]
+
+plot.gam(gam_model_distance_by_age, shift = intercept23, shade=T,select=1, cex.axis=1.6, bty="n", xlab='', ylab='', ylim=c(-3, 2)) 
+abline(v=c(-850,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(-0.38, 0))
+
+plot.gam(gam_model_distance_by_age, shift = intercept23, shade=T,select=2,  cex.axis=1.6, bty="n", xlab='', ylab='', ylim=c(-3, 2))
+abline(v=c(-1100,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=c(-0.4, 0))
+
+```
+
+
+# data exploration for the commercial fish data
+```{r}
+summary.factor(data_commercial_fish$young_old)
+summary.factor(data_commercial_fish$small_big)
+
+data_commercial_fish_samples<- as.data.frame(unique(data_commercial_fish$site_code))
+data_commercial_fish_samples
+
+#median size
+data_median_size <- data_commercial_fish$no_take_size_km2
+data_median_size <- data_median_size[!is.na(data_median_size)]
+
+median(data_median_size)
+mean(data_median_size)
+
+MPA_size<- unique(data_median_size)
+
+median(MPA_size)
+mean(MPA_size)
+
+
+# median age
+data_median_age <- data_commercial_fish$years_of_protection_avg 
+data_median_age <- data_median_age[!is.na(data_median_age)]
+
+median(data_median_age)
+mean(data_median_age)
+
+MPA_age <-unique(data_median_age)
+
+median(MPA_age)
+mean(MPA_age)
+
+
+# exploring the balance in MPA age data
+data_fish_old<- data_commercial_fish %>% 
+    filter(young_old=="old")
+
+summary.factor(data_fish_old$small_big)
+
+samples_old_MPA<- as.data.frame(unique(data_fish_old$site_code))
+samples_old_MPA
+
+data_fish_young<- data_commercial_fish %>% 
+    filter(young_old=="young")
+
+summary.factor(data_fish_young$small_big)
+
+samples_young_MPA<- as.data.frame(unique(data_fish_young$site_code))
+samples_young_MPA
+
+
+# exploring the balance in MPA size data
+data_fish_small<- data_commercial_fish %>% 
+    filter(small_big=="small")
+
+summary.factor(data_fish_small$young_old)
+
+samples_small_MPA<- as.data.frame(unique(data_fish_small$site_code))
+samples_small_MPA
+
+data_fish_large<- data_commercial_fish %>% 
+    filter(small_big=="large")
+
+summary.factor(data_fish_large$young_old)
+
+samples_large_MPA<- as.data.frame(unique(data_fish_large$site_code))
+samples_large_MPA
+
+```
+
+# GAM model allowing the distance to change by MPA age (young < 10 Y or old >10 Y) for COMMERCIAL FISH data
+
+```{r}
+
+gam_model_fish_reserve_age <- gam(ln_effect_size ~ s(distance_from_reserve_border, by=young_old ,bs ="ad")+s(site_code, bs="re"), data = data_commercial_fish, method = "REML", weights = log(transects+1))
+
+summary(gam_model_fish_reserve_age)
+AICc(gam_model_fish_reserve_age)
+gam.check(gam_model_fish_reserve_age)
+
+intercept24 <- gam_model_fish_reserve_age$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_model_fish_reserve_age, shift = intercept24, shade=T, select=1, cex.axis=1.6,xlab='', ylab='', xlim=c(-3000, 6000), ylim=c(-3, 2), bty="n")
+abline(v=c(-900,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0, col="red")
+
+plot.gam(gam_model_fish_reserve_age, shift = intercept24, shade=T, select=2, cex.axis=1.6,xlab='', ylab='', xlim=c(-3000, 6000), ylim=c(-3, 2), bty="n")
+abline(v=c(-400,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0, col="red")
+
+```
+
+
+# GAM model allowing the distance to change by MPA size (small< 3km^2 or big >3 km^2) for COMMERCIAL FISH data
+```{r}
+
+gam_model_fish_reserve_size <- gam(ln_effect_size ~ s(distance_from_reserve_border, by=small_big ,bs ="ad")+s(site_code, bs="re"), data = data_commercial_fish, method = "REML", weights = log(transects+1))
+
+summary(gam_model_fish_reserve_size)
+AICc(gam_model_fish_reserve_size)
+gam.check(gam_model_fish_reserve_size)
+
+intercept25 <- gam_model_fish_reserve_size$coefficients[["(Intercept)"]]
+
+
+plot.gam(gam_model_fish_reserve_size, shift = intercept25, shade=T, select=1, cex.axis=1.6,xlab='', ylab='', xlim=c(-3000, 6000), ylim=c(-3, 2), bty="n")
+abline(v=c(-1400,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0, col="red")
+
+
+
+plot.gam(gam_model_fish_reserve_size, shift = intercept25, shade=T, select=2, cex.axis=1.6,xlab='', ylab='', xlim=c(-3000, 6000), ylim=c(-3, 2), bty="n")
+abline(v=c(-400,0), col=c("#E10600FF", "#00729f"),  lty=c(2,1), lwd=c(3, 3))
+#abline(h=0, col="red")
+
+
+```
+
+************************************
+# Model selection for fixed effects
+```{r}
+
+#distance
+gam_model_disatnce_1<-gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_disatnce_1)
+AICc(gam_model_disatnce_1)
+plot.gam(gam_model_disatnce_1)
+
+#distance+age continues
+gam_model_disatnce_age<-gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_disatnce_age)
+AICc(gam_model_disatnce_age)
+
+#distance+age category
+
+gam_model_disatnce_age_cat<-gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+young_old, data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_disatnce_age_cat)
+AICc(gam_model_disatnce_age_cat)
+
+#distance+size
+
+gam_model_disatnce_size<-gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_disatnce_size)
+AICc(gam_model_disatnce_size)
+
+#distance+size category
+gam_model_disatnce_size_cat<-gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+small_big, data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_disatnce_size_cat)
+AICc(gam_model_disatnce_size_cat)
+
+#distance+taxonomy
+gam_model_disatnce_tax<-gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+fish_invertebrate, data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_disatnce_tax)
+AICc(gam_model_disatnce_tax)
+
+#distance+age+taxonomy
+gam_model_disatnce_age_tax<-gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+fish_invertebrate, data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_disatnce_age_tax)
+AICc(gam_model_disatnce_age_tax)
+
+#distance+size+taxonomy
+gam_model_disatnce_size_tax<-gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate, data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_disatnce_size_tax)
+AICc(gam_model_disatnce_size_tax)
+
+#distance+age+size
+gam_model_disatnce_age_size<-gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_disatnce_age_size)
+AICc(gam_model_disatnce_age_size)
+
+#distance+age+size+taxonomy
+gam_model_disatnce_age_size_tax<-gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate, data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_disatnce_age_size_tax)
+AICc(gam_model_disatnce_age_size_tax)
+
+#age
+gam_model_age<-gam(ln_effect_size ~ s(years_of_protection_avg, bs = "ad"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_age)
+AICc(gam_model_age)
+
+
+#size
+gam_model_size <- gam(ln_effect_size ~ s(log(no_take_size_km2+1), bs = "ad"), data = data_for_gam_subset, method = "REML", weights = log(transects+1))
+
+summary(gam_model_size)
+AICc(gam_model_size)
+
+
+#taxa
+gam_model_taxa<-gam(ln_effect_size ~ fish_invertebrate, data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_taxa)
+AICc(gam_model_taxa)
+
+```
+
+
+# Creating an AICc list of the different GAMs comapring the fixed affects
+
+```{r}
+
+gam_list=list(gam_model_disatnce_1, gam_model_disatnce_age, gam_model_disatnce_age_cat, gam_model_disatnce_size, gam_model_disatnce_size_cat,gam_model_disatnce_tax, gam_model_disatnce_size_tax, gam_model_disatnce_age_tax, gam_model_disatnce_age_size, gam_model_disatnce_age_size_tax, gam_model_age, gam_model_size, gam_model_taxa)
+names(gam_list) = c("gam_model_disatnce_1","gam_model_disatnce_age", "gam_model_disatnce_age_cat", "gam_model_disatnce_size", "gam_model_disatnce_size_cat", "gam_model_disatnce_tax","gam_model_disatnce_size_tax", "gam_model_disatnce_age_tax", "gam_model_disatnce_age_size", "gam_model_disatnce_age_size_tax", "gam_model_age", "gam_model_size", "gam_model_taxa")
+gam_aic = AIC_GAM_F(gam_list)
+
+#cerate deviece explain dataframe
+#deviance of "gam_model_disatnce_1" model
+dev_ex00 =  1-gam_model_disatnce_1$deviance/gam_model_disatnce_1$null.deviance
+
+#deviance of "gam_model_disatnce_age" model
+dev_ex11 =  1-gam_model_disatnce_age$deviance/gam_model_disatnce_age$null.deviance
+
+#deviance of "gam_model_disatnce_age_cat" model
+dev_ex22 =  1-gam_model_disatnce_age_cat$deviance/gam_model_disatnce_age_cat$null.deviance
+
+#deviance of "gam_model_disatnce_size" model
+dev_ex33 =  1-gam_model_disatnce_size$deviance/gam_model_disatnce_size$null.deviance
+
+#deviance of "gam_model_disatnce_size_cat" model
+dev_ex44 =  1-gam_model_disatnce_size_cat$deviance/gam_model_disatnce_size_cat$null.deviance
+
+#deviance of "gam_model_disatnce_tax" model
+dev_ex55 =  1-gam_model_disatnce_tax$deviance/gam_model_disatnce_tax$null.deviance
+
+#deviance of "gam_model_disatnce_age_size_tax" model
+dev_ex66 =  1-gam_model_disatnce_age_size_tax$deviance/gam_model_disatnce_age_size_tax$null.deviance
+
+# deviance of "gam_model_disatnce_size_tax"
+dev_ex77 =  1-gam_model_disatnce_size_tax$deviance/gam_model_disatnce_size_tax$null.deviance
+
+#deviance of "gam_model_disatnce_age_tax"
+dev_ex88 =  1-gam_model_disatnce_age_tax$deviance/gam_model_disatnce_age_tax$null.deviance
+
+#deviance of "gam_model_disatnce_age_size"
+dev_ex99 =  1-gam_model_disatnce_age_size$deviance/gam_model_disatnce_age_size$null.deviance
+
+#deviance of "gam_model_age"
+dev_ex100 =  1-gam_model_age$deviance/gam_model_age$null.deviance
+
+#deviance of "gam_model_size"
+dev_ex110 =  1-gam_model_size$deviance/gam_model_size$null.deviance
+
+#deviance of "gam_model_taxa"
+dev_ex120 =  1-gam_model_taxa$deviance/gam_model_taxa$null.deviance
+
+
+#join to 1 data, create colnames, as dataframe, with another column with model names
+dev_ex = rbind(dev_ex00, dev_ex11,dev_ex22, dev_ex33, dev_ex44, dev_ex55, dev_ex66, dev_ex77, dev_ex88, dev_ex99, dev_ex100, dev_ex110, dev_ex120)
+colnames(dev_ex) = c("dev_ex")
+dev_ex = as.data.frame(dev_ex)
+dev_ex = dev_ex%>% mutate(model_name = c("gam_model_disatnce_1", "gam_model_disatnce_age", "gam_model_disatnce_age_cat","gam_model_disatnce_size", "gam_model_disatnce_size_cat", "gam_model_disatnce_tax", "gam_model_disatnce_size_tax", "gam_model_disatnce_age_tax", "gam_model_disatnce_age_size","gam_model_disatnce_age_size_tax", "gam_model_age", "gam_model_size", "gam_model_taxa"))
+
+# join deviance explain with aic table
+gam_aic =  left_join(gam_aic, dev_ex)
+
+```
+
+# Model selection for random effects
+# putting all the fixed effects, and only then adding optional random effects one by one 
+```{r}
+gam_model_check<-gam(ln_effect_size ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate, data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check)
+AICc(gam_model_check)
+
+intercept30 <- gam_model_check$coefficients[["(Intercept)"]]
+plot.gam(gam_model_check, shift = intercept30, shade=T)
+
+
+```
+
+# Now adding one by one the random effects
+```{r}
+
+gam_model_check1<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(study_number, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check1)
+AICc(gam_model_check1)
+
+gam_model_check2<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(taxonomic_group, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check2)
+AICc(gam_model_check2)
+
+gam_model_check3<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(reserve_name, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check3)
+AICc(gam_model_check3)
+
+
+gam_model_check4<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(site_code, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check4)
+AICc(gam_model_check4)
+
+gam_model_check5<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(study_number, bs="re")+s(site_code, bs="re")+s(reserve_name, bs="re")+s(taxonomic_group, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check5)
+AICc(gam_model_check5)
+
+
+gam_model_check6<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(study_number, bs="re")+s(reserve_name, bs="re")+s(site_code, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check6)
+AICc(gam_model_check6)
+
+gam_model_check7<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(study_number, bs="re")+s(site_code, bs="re")+s(taxonomic_group, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check7)
+AICc(gam_model_check7)
+
+
+gam_model_check8<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(site_code, bs="re")+s(reserve_name, bs="re")+s(taxonomic_group, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check8)
+AICc(gam_model_check8)
+
+gam_model_check9<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(site_code, bs="re")+s(reserve_name, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check9)
+AICc(gam_model_check9)
+
+gam_model_check10<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(site_code, bs="re")+s(taxonomic_group, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check10)
+AICc(gam_model_check10)
+
+gam_model_check11<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(site_code, bs="re")+s(study_number, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check11)
+AICc(gam_model_check11)
+
+gam_model_check12<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(study_number, bs="re")+s(taxonomic_group, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check12)
+AICc(gam_model_check12)
+
+gam_model_check13<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(study_number, bs="re")+s(reserve_name, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check13)
+AICc(gam_model_check13)
+
+gam_model_check14<-gam((ln_effect_size) ~ s(distance_from_reserve_border, bs = "ad")+s(years_of_protection_avg, bs = "ad")+s(log(no_take_size_km2+1), bs = "ad")+fish_invertebrate+s(reserve_name, bs="re")+s(taxonomic_group, bs="re"), data = data_for_gam_subset, method = "REML",weights = log(transects+1))
+
+summary(gam_model_check14)
+AICc(gam_model_check14)
+```
+
+#Creating a list of the different GAMs and comparing them with AIC and deviance explained. 
+
+```{r}
+
+gam_list1=list(gam_model_check, gam_model_check1, gam_model_check2, gam_model_check3, gam_model_check4,gam_model_check5, gam_model_check6, gam_model_check7, gam_model_check8, gam_model_check9, gam_model_check10, gam_model_check11, gam_model_check12, gam_model_check13, gam_model_check14)
+names(gam_list1) = c("gam_model_check", "gam_model_check1", "gam_model_check2", "gam_model_check3", "gam_model_check4","gam_model_check5", "gam_model_check6", "gam_model_check7", "gam_model_check8", "gam_model_check9", "gam_model_check10", "gam_model_check11", "gam_model_check12", "gam_model_check13", "gam_model_check14")
+gam_aic1 = AIC_GAM_A(gam_list1)
+
+#cerate deviece explain dataframe
+#deviance of "gam_model_check" model
+dev_ex0 =  1-gam_model_check$deviance/gam_model_check$null.deviance
+
+#deviance of "gam_model_check1" model
+dev_ex1 =  1-gam_model_check1$deviance/gam_model_check1$null.deviance
+
+#deviance of "gam_model_check2" model
+dev_ex2 =  1-gam_model_check2$deviance/gam_model_check2$null.deviance
+
+#deviance of "gam_model_check3" model
+dev_ex3 =  1-gam_model_check3$deviance/gam_model_check3$null.deviance
+
+#deviance of "gam_model_check4" model
+dev_ex4 =  1-gam_model_check4$deviance/gam_model_check4$null.deviance
+
+#deviance of "gam_model_check5" model
+dev_ex5 =  1-gam_model_check5$deviance/gam_model_check5$null.deviance
+
+#deviance of "gam_model_check6" model
+dev_ex6 =  1-gam_model_check6$deviance/gam_model_check6$null.deviance
+
+#deviance of "gam_model_check7" model
+dev_ex7 =  1-gam_model_check7$deviance/gam_model_check7$null.deviance
+
+#deviance of "gam_model_check8" model
+dev_ex8 =  1-gam_model_check8$deviance/gam_model_check8$null.deviance
+
+#deviance of "gam_model_check9" model
+dev_ex9 =  1-gam_model_check9$deviance/gam_model_check9$null.deviance
+
+#deviance of "gam_model_check10" model
+dev_ex10 =  1-gam_model_check10$deviance/gam_model_check10$null.deviance
+
+#deviance of "gam_model_check11" model
+dev_ex11 =  1-gam_model_check11$deviance/gam_model_check11$null.deviance
+
+#deviance of "gam_model_check12" model
+dev_ex12 =  1-gam_model_check12$deviance/gam_model_check12$null.deviance
+
+#deviance of "gam_model_check13" model
+dev_ex13 =  1-gam_model_check13$deviance/gam_model_check13$null.deviance
+
+#deviance of "gam_model_check14" model
+dev_ex14 =  1-gam_model_check14$deviance/gam_model_check14$null.deviance
+
+#join to 1 data, create colnames, as dataframe, with another column with model names
+dev_exp = rbind(dev_ex0, dev_ex1,dev_ex2, dev_ex3, dev_ex4, dev_ex5, dev_ex6, dev_ex7, dev_ex8, dev_ex9, dev_ex10, dev_ex11, dev_ex12, dev_ex13, dev_ex14)
+colnames(dev_exp) = c("dev_ex")
+dev_exp = as.data.frame(dev_exp)
+dev_exp = dev_exp%>% mutate(model_name1 = c("gam_model_check", "gam_model_check1", "gam_model_check2", "gam_model_check3", "gam_model_check4","gam_model_check5", "gam_model_check6", "gam_model_check7", "gam_model_check8", "gam_model_check9", "gam_model_check10", "gam_model_check11", "gam_model_check12", "gam_model_check13", "gam_model_check14"))
+
+#join deviance explain with aic table
+gam_aic1 =  left_join(gam_aic1, dev_exp)
+
+#comparing site code as single random effect to site code+study+reserve+taxonomy
+gam_list2=list(gam_model_check4, gam_model_check5)
+names(gam_list2) = c("gam_model_check4", "gam_model_check5")
+gam_aic2 = AIC_GAM_A(gam_list2)
+dev_exp_2= rbind(dev_ex4, dev_ex5)
+colnames(dev_exp_2) = c("dev_ex")
+dev_exp_2 = as.data.frame(dev_exp_2)
+dev_exp_2 = dev_exp_2%>% mutate(model_name1 = c("gam_model_check4","gam_model_check5"))
+gam_aic2 =  left_join(gam_aic2, dev_exp_2)
+```
+
+#Applying the biomass reduction rate as a result of edge effect on the global no-take MPAs network
+#uploading the MPAtlas data and the biomass reduction rate file I calculated from my model
+```{r}
+
+all_mpa <- read_csv("mpatlas_20200407_FullCalcs.csv")
+biomass_reduction<- read_csv("biomass_reduction_2020_11_10.csv")
+```
+
+# add to biomass reduction data a colum calculating the reduction in biomass for every radius (in 100 meters intervals)
+# taking into acount the proportional area of every "ring" from the total MPA arae 
+```{r}
+
+biomass_reduction$biomass_loss_total = NA
+biomass_reduction_rate = biomass_reduction[-1,]
+for (i in 1:nrow(biomass_reduction_rate)){
+  sub = biomass_reduction_rate[1:i,]
+  ss = 0
+  for (j in 1:nrow(sub)){
+    ss = ss + (sub$Ratio[j] * sub$removed_average[i+1-j])
+  }
+  sss = ss/sum(sub$Ratio)
+  biomass_reduction_rate$biomass_loss_total[i] <- sss
+}
+rm(i,j,sub,ss,sss)
+
+biomass_reduction_rate = biomass_reduction_rate %>% 
+  dplyr::select(Distance_from_border,biomass_loss_total)
+
+```
+
+
+# subseting only the no-take MPAs out of all the MPAs
+```{r}
+
+#check the data
+
+summary.factor(all_mpa$status)
+summary.factor(all_mpa$no_take)
+
+#subset only no-take
+no_take <- all_mpa %>% 
+  filter (no_take=="All"| no_take=="Part") %>% 
+  filter (status=="Designated"|status=="Established")%>% 
+  filter(implemente==1)%>%
+  filter (no_take_ar>0)
+
+#round up function
+roundUp <- function(x)
+{
+  100*(x%/%100 + as.logical(x%%100))
+}
+
+#round down function
+roundDown <- function(x)
+{
+  100*(x%/%100)
+}
+
+
+no_take_biomass <- no_take %>% 
+  mutate(mpa_radius = sqrt(no_take_ar/pi)) %>% #add a column of MPA redius assuming its circular 
+  mutate(mpa_radius_meters=(mpa_radius*1000))%>% #convert the km into meters
+  mutate(Distance_from_border= roundUp(mpa_radius_meters)) %>% #rounf the number down to the nearest 100 meter
+  left_join(biomass_reduction_rate, by = "Distance_from_border") %>%
+  mutate(precent_biomass_lossed=biomass_loss_total*100)
+ 
+
+```
+
+# classify the MPAs by 6 size categories
+# and average the biomass reduction rate for each category
+```{r}
+no_take_biomass <- no_take_biomass %>% 
+  mutate(size_category= case_when(no_take_ar < 1 ~ "0-1", no_take_ar >= 1 & no_take_ar<10~ "1-10", no_take_ar >= 10 & no_take_ar<100 ~ "10-100", no_take_ar >= 100 & no_take_ar<1000~ "10^2-10^3",no_take_ar >= 1000 & no_take_ar<10000~ "10^3-10^4", no_take_ar >= 10000~ "10^4-10^5"))
+
+summary.factor(no_take_biomass$size_category)
+  
+no_take_summary <- no_take_biomass %>% 
+  group_by(size_category) %>% 
+               summarise(mean_removed_total = mean(precent_biomass_lossed),
+               sd=sd(precent_biomass_lossed, na.rm = TRUE),
+                mpa_number =  n()) %>% 
+  mutate(mpa_percent=(mpa_number/1329)*100)  %>%   
+  ungroup()
+
+
+```
+
+#plot the results
+
+```{r}
+
+
+no_take_biomass %>% 
+  ggplot()+
+  aes(x = size_category, y = precent_biomass_lossed)+
+  stat_summary(geom = "bar",fun.data = "mean_se",width = 0.4, fill="#E10600FF", color = "black", position = position_nudge(x = 0.22))+
+  stat_summary(geom = "errorbar",fun.data = "mean_se",width = 0.25, position = position_nudge(x = 0.22))+
+  stat_summary(geom = "bar", fun= function(y) 100*length(y)/1329  , color = "black",
+               fill = "#FF9900",width = 0.4, position = position_nudge(x = -0.22))+
+  theme_classic() +
+  ylim(0,80)+
+  theme(axis.text.x = element_blank(), axis.title.x = element_blank(), axis.text.y = element_blank(), axis.title.y = element_blank())
+
+
+``````
